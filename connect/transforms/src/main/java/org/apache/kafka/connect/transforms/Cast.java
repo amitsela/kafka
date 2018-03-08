@@ -24,20 +24,26 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.ConnectRecord;
 import org.apache.kafka.connect.data.ConnectSchema;
+import org.apache.kafka.connect.data.Date;
+import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.Time;
+import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.transforms.util.SchemaUtil;
 import org.apache.kafka.connect.transforms.util.SimpleConfig;
 
+import java.text.SimpleDateFormat;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 
 import static org.apache.kafka.connect.transforms.util.Requirements.requireMap;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
@@ -80,12 +86,18 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
 
     private static final Set<Schema.Type> SUPPORTED_CAST_TYPES = EnumSet.of(
             Schema.Type.INT8, Schema.Type.INT16, Schema.Type.INT32, Schema.Type.INT64,
-                    Schema.Type.FLOAT32, Schema.Type.FLOAT64, Schema.Type.BOOLEAN, Schema.Type.STRING
+                    Schema.Type.FLOAT32, Schema.Type.FLOAT64, Schema.Type.BOOLEAN,
+                            Schema.Type.STRING, Schema.Type.BYTES
     );
 
     // As a special case for casting the entire value (e.g. the incoming key is a int64 but you know it could be an
     // int32 and want the smaller width), we use an otherwise invalid field name in the cast spec to track this.
     private static final String WHOLE_VALUE_CAST = null;
+
+    // To be used for transforming Date and Time into string.
+    private static final SimpleDateFormat SIMPLE_DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
+    private static final SimpleDateFormat SIMPLE_TIME_FORMAT = new SimpleDateFormat("HH:mm:ss.SSS");
+    private static final SimpleDateFormat SIMPLE_TIMESTAMP_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'");
 
     private Map<String, Schema.Type> casts;
     private Schema.Type wholeValueCastType;
@@ -120,14 +132,14 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
 
     private R applySchemaless(R record) {
         if (wholeValueCastType != null) {
-            return newRecord(record, null, castValueToType(operatingValue(record), wholeValueCastType));
+            return newRecord(record, null, castValueToType(null, operatingValue(record), wholeValueCastType));
         }
 
         final Map<String, Object> value = requireMap(operatingValue(record), PURPOSE);
         final HashMap<String, Object> updatedValue = new HashMap<>(value);
         for (Map.Entry<String, Schema.Type> fieldSpec : casts.entrySet()) {
             String field = fieldSpec.getKey();
-            updatedValue.put(field, castValueToType(value.get(field), fieldSpec.getValue()));
+            updatedValue.put(field, castValueToType(null, value.get(field), fieldSpec.getValue()));
         }
         return newRecord(record, null, updatedValue);
     }
@@ -138,7 +150,7 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
 
         // Whole-record casting
         if (wholeValueCastType != null)
-            return newRecord(record, updatedSchema, castValueToType(operatingValue(record), wholeValueCastType));
+            return newRecord(record, updatedSchema, castValueToType(valueSchema, operatingValue(record), wholeValueCastType));
 
         // Casting within a struct
         final Struct value = requireStruct(operatingValue(record), PURPOSE);
@@ -147,7 +159,9 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
         for (Field field : value.schema().fields()) {
             final Object origFieldValue = value.get(field);
             final Schema.Type targetType = casts.get(field.name());
-            final Object newFieldValue = targetType != null ? castValueToType(origFieldValue, targetType) : origFieldValue;
+            final Schema origFieldSchema = valueSchema.field(field.name()).schema();
+            final Object newFieldValue = targetType != null ?
+                    castValueToType(origFieldSchema, origFieldValue, targetType) : origFieldValue;
             updatedValue.put(updatedSchema.field(field.name()), newFieldValue);
         }
         return newRecord(record, updatedSchema, updatedValue);
@@ -169,7 +183,7 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
                 if (field.schema().isOptional())
                     fieldBuilder.optional();
                 if (field.schema().defaultValue() != null)
-                    fieldBuilder.defaultValue(castValueToType(field.schema().defaultValue(), fieldBuilder.type()));
+                    fieldBuilder.defaultValue(castValueToType(field.schema(), field.schema().defaultValue(), fieldBuilder.type()));
                 builder.field(field.name(), fieldBuilder.build());
             }
         }
@@ -177,7 +191,7 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
         if (valueSchema.isOptional())
             builder.optional();
         if (valueSchema.defaultValue() != null)
-            builder.defaultValue(castValueToType(valueSchema.defaultValue(), builder.type()));
+            builder.defaultValue(castValueToType(valueSchema, valueSchema.defaultValue(), builder.type()));
 
         updatedSchema = builder.build();
         schemaUpdateCache.put(valueSchema, updatedSchema);
@@ -202,17 +216,21 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
                 return SchemaBuilder.bool();
             case STRING:
                 return SchemaBuilder.string();
+            case BYTES:
+                return SchemaBuilder.string();
             default:
                 throw new DataException("Unexpected type in Cast transformation: " + type);
         }
 
     }
 
-    private static Object castValueToType(Object value, Schema.Type targetType) {
+    private static Object castValueToType(Schema schema, Object value, Schema.Type targetType) {
         try {
             if (value == null) return null;
 
-            Schema.Type inferredType = ConnectSchema.schemaType(value.getClass());
+            // Fail if no schema was provided and couldn't infer one
+            Schema.Type inferredType = schema == null ? ConnectSchema.schemaType(value.getClass()) :
+                    schema.type();
             if (inferredType == null) {
                 throw new DataException("Cast transformation was passed a value of type " + value.getClass()
                         + " which is not supported by Connect's data API");
@@ -237,6 +255,8 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
                     return castToBoolean(value);
                 case STRING:
                     return castToString(value);
+                case BYTES:
+                    return castLogicalToString(schema, value);
                 default:
                     throw new DataException(targetType.toString() + " is not supported in the Cast transformation.");
             }
@@ -324,6 +344,29 @@ public abstract class Cast<R extends ConnectRecord<R>> implements Transformation
 
     private static String castToString(Object value) {
         return value.toString();
+    }
+
+    private static String castLogicalToString(Schema schema, Object value) {
+        if (schema == null)
+            throw new DataException("LogicalType casting requires a schema.");
+        switch (schema.name()) {
+            case Decimal.LOGICAL_NAME:
+                return Decimal.toLogical(schema, (byte[]) value).toString();
+            case Date.LOGICAL_NAME:
+                java.util.Date date = Date.toLogical(schema, (Integer) value);
+                SIMPLE_DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
+                return SIMPLE_DATE_FORMAT.format(date);
+            case Time.LOGICAL_NAME:
+                java.util.Date time = Time.toLogical(schema, (Integer) value);
+                SIMPLE_TIME_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
+                return SIMPLE_TIME_FORMAT.format(time);
+            case Timestamp.LOGICAL_NAME:
+                java.util.Date timestamp = Timestamp.toLogical(schema, (Long) value);
+                SIMPLE_TIMESTAMP_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
+                return SIMPLE_TIMESTAMP_FORMAT.format(timestamp);
+            default:
+                throw new DataException("Unexpected LogicalType " + schema.name());
+        }
     }
 
     protected abstract Schema operatingSchema(R record);

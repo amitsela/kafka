@@ -18,14 +18,13 @@
 package org.apache.kafka.connect.transforms;
 
 import org.apache.kafka.common.config.ConfigException;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.SchemaBuilder;
-import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.After;
 import org.junit.Test;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -170,6 +169,54 @@ public class CastTest {
     }
 
     @Test
+    public void castWholeRecordValueWithSchemaLogicalTypeDecimal() {
+        xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "bytes"));
+        BigDecimal decimalValue = BigDecimal.valueOf(42);
+        Schema decimalSchema = Decimal.builder(decimalValue.scale()).build();
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null, "topic", 0,
+                decimalSchema, Decimal.fromLogical(decimalSchema, decimalValue)));
+
+        assertEquals(Schema.Type.STRING, transformed.valueSchema().type());
+        assertEquals("42", transformed.value());
+    }
+
+    @Test
+    public void castWholeRecordValueWithSchemaLogicalTypeDate() {
+        xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "bytes"));
+        java.util.Date dateValue = new java.util.Date(0);
+        Schema dateSchema = Date.builder().build();
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null, "topic", 0,
+                dateSchema, Date.fromLogical(dateSchema, dateValue)));
+
+        assertEquals(Schema.Type.STRING, transformed.valueSchema().type());
+        assertEquals("1970-01-01", transformed.value());
+    }
+
+    @Test
+    public void castWholeRecordValueWithSchemaLogicalTypeTime() {
+        xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "bytes"));
+        java.util.Date timeValue = new java.util.Date(0);
+        Schema timeSchema = Time.builder().build();
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null, "topic", 0,
+                timeSchema, Time.fromLogical(timeSchema, timeValue)));
+
+        assertEquals(Schema.Type.STRING, transformed.valueSchema().type());
+        assertEquals("00:00:00.000", transformed.value());
+    }
+
+    @Test
+    public void castWholeRecordValueWithSchemaLogicalTypeTimestamp() {
+        xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "bytes"));
+        java.util.Date timestampValue = new java.util.Date(0);
+        Schema timestampSchema = Timestamp.builder().build();
+        SourceRecord transformed = xformValue.apply(new SourceRecord(null, null, "topic", 0,
+                timestampSchema, Timestamp.fromLogical(timestampSchema, timestampValue)));
+
+        assertEquals(Schema.Type.STRING, transformed.valueSchema().type());
+        assertEquals("1970-01-01T00:00:00.000Z", transformed.value());
+    }
+
+    @Test
     public void castWholeRecordDefaultValue() {
         // Validate default value in schema is correctly converted
         xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "int32"));
@@ -287,6 +334,12 @@ public class CastTest {
         xformValue.apply(new SourceRecord(null, null, "topic", 0, null, Collections.singletonList("foo")));
     }
 
+    @Test(expected = DataException.class)
+    public void castWholeRecordValueSchemalessUnsupportedLogicalType() {
+        xformValue.configure(Collections.singletonMap(Cast.SPEC_CONFIG, "bytes"));
+        xformValue.apply(new SourceRecord(null, null, "topic", 0, null, BigDecimal.valueOf(42)));
+    }
+
 
     @Test
     public void castFieldsWithSchema() {
@@ -299,6 +352,7 @@ public class CastTest {
         builder.field("int32", SchemaBuilder.int32().defaultValue(2).build());
         builder.field("int64", Schema.INT64_SCHEMA);
         builder.field("float32", Schema.FLOAT32_SCHEMA);
+        builder.field("bytes", Date.builder().build());
         // Default value here ensures we correctly convert default values
         builder.field("float64", SchemaBuilder.float64().defaultValue(-1.125).build());
         builder.field("boolean", Schema.BOOLEAN_SCHEMA);
@@ -312,6 +366,7 @@ public class CastTest {
         recordValue.put("int32", 32);
         recordValue.put("int64", (long) 64);
         recordValue.put("float32", 32.f);
+        recordValue.put("bytes", Date.fromLogical(Date.builder().build(), new java.util.Date(0)));
         recordValue.put("float64", -64.);
         recordValue.put("boolean", true);
         recordValue.put("string", "42");
@@ -327,6 +382,7 @@ public class CastTest {
         assertEquals(2L, ((Struct) transformed.value()).schema().field("int32").schema().defaultValue());
         assertEquals(true, ((Struct) transformed.value()).get("int64"));
         assertEquals(32., ((Struct) transformed.value()).get("float32"));
+        assertEquals("1970-01-01", ((Struct) transformed.value()).get("bytes"));
         assertEquals(true, ((Struct) transformed.value()).get("float64"));
         assertEquals(true, ((Struct) transformed.value()).schema().field("float64").schema().defaultValue());
         assertEquals((byte) 1, ((Struct) transformed.value()).get("boolean"));
